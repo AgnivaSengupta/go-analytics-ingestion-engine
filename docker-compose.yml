@@ -1,9 +1,11 @@
-version: '3.8'
+version: "3.8"
 services:
   redis:
     image: redis:alpine
     ports:
       - "6379:6379"
+    networks:
+      - analytics_net
 
   api:
     build:
@@ -15,13 +17,36 @@ services:
       - REDIS_DSN=redis://redis:6379
     depends_on:
       - redis
-      
+    networks:
+      - analytics_net
+
   worker:
-      build: 
-        context: .
-        target: worker # <--- NOTE THIS (Uses the same code, different binary)
-      environment:
-        - REDIS_DSN=redis://redis:6379
-        - DB_DSN=postgresql://neondb_owner:npg_2Dj0yanOAcze@ep-mute-butterfly-a19gn7fh-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
-      depends_on:
-        - redis
+    build:
+      context: .
+      target: worker # <--- NOTE THIS (Uses the same code, different binary)
+    deploy:
+      mode: replicated
+      replicas: 5  # <--- Run 5 instances
+    environment:
+      - REDIS_DSN=redis://redis:6379
+      - DB_DSN=${NEON_URL}
+    depends_on:
+      - redis
+    networks:
+      - analytics_net
+
+  cron:
+    build:
+      context: .
+      target: cron
+    environment:
+      - DB_DSN=${NEON_URL}
+    depends_on:
+      - worker
+    restart: always
+    networks:
+      - analytics_net
+
+networks:
+  analytics_net:
+    driver: bridge

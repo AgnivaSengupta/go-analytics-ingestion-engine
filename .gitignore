@@ -1,0 +1,24 @@
+# --- Binaries & Build Artifacts ---
+
+/bin/
+
+/cmd/api/api
+/cmd/worker/worker
+/cmd/cron/cron
+/cmd/api/api.exe
+/cmd/worker/worker.exe
+/cmd/cron/cron.exe
+
+*.exe
+*.test
+*.prof
+*.out
+
+.env
+.env.*
+!.env.example
+
+.vscode/
+
+loadtest.js
+loadtest-5k.js

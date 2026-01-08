@@ -26,19 +26,19 @@ type AnalyticsEvent struct {
 }
 
 func main() {
-	
+
 	fmt.Println("DEBUG: Dumping Environment Variables...")
     fmt.Printf("DEBUG: REDIS_DSN='%s'\n", os.Getenv("REDIS_DSN"))
     fmt.Printf("DEBUG: DB_DSN='%s'\n", os.Getenv("DB_DSN"))
-	
-	
+
+
 	if err := queue.InitReddis(); err != nil {
 		log.Fatalf("Failed to init Redis: %v", err)
 	}
 
 	dbUrl := os.Getenv("DB_DSN")
 	if dbUrl == "" {
-		dbUrl = "postgresql://neondb_owner:npg_2Dj0yanOAcze@ep-mute-butterfly-a19gn7fh-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+		dbUrl = "postgres://user:password@localhost:5432/analytics"
 	}
 
 	dbPool, err := pgxpool.New(context.Background(), dbUrl)
@@ -47,21 +47,28 @@ func main() {
 	}
 	defer dbPool.Close()
 
-	createTableSQL := `
-		CREATE TABLE IF NOT EXISTS analytics_events (
-			id SERIAL PRIMARY KEY,
+	queries := []string{
+
+		`CREATE TABLE IF NOT EXISTS analytics_events (
+			timestamp TIMESTAMPTZ NOT NULL,
 			blog_id TEXT NOT NULL,
 			url TEXT NOT NULL,
 			user_id TEXT,
 			event_type TEXT,
-			timestamp TIMESTAMPTZ NOT NULL,
 			user_agent TEXT,
 			ip_address TEXT
-		);
-		`
-	_, err = dbPool.Exec(context.Background(), createTableSQL)
-	if err != nil {
-		log.Fatalf("Failed to create table: %v", err)
+		);`,
+
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_event ON analytics_events (blog_id, user_id, url, timestamp);`,
+
+		`CREATE INDEX IF NOT EXISTS idx_lookup ON analytics_events (blog_id, url, timestamp DESC)`,
+	}
+
+	for _, q := range queries {
+		_, err = dbPool.Exec(context.Background(), q)
+		if err != nil {
+			log.Fatalf("Schema warning: %v", err)
+		}
 	}
 
 	log.Println("🚀 Worker started. Listening for events...")
@@ -74,7 +81,7 @@ func main() {
 func processQueue(db *pgxpool.Pool){
 	batchSize := 500
 	batchTimeout := 5*time.Second
-	
+
 	var batch []AnalyticsEvent
 		ticker := time.NewTicker(batchTimeout)
 		defer ticker.Stop()
@@ -106,10 +113,10 @@ func processQueue(db *pgxpool.Pool){
 				// Fetch from Redis (Blocking Pop with 1s timeout to allow loop to check ticker)
 				// We use BLPOP to wait efficiently without burning CPU
 				result, err := queue.Client.BLPop(ctx, 1*time.Second, "analytics_queue").Result()
-				
+
 				if err != nil {
 					// Redis Timeout (no data) is not a fatal error, just loop again
-					continue 
+					continue
 				}
 
 				// Parse Data (result[1] contains the JSON payload)
@@ -131,28 +138,49 @@ func processQueue(db *pgxpool.Pool){
 		}
 }
 
-// flushToDB uses PostgreSQL COPY protocol for maximum speed
+
 func flushToDB(db *pgxpool.Pool, batch []AnalyticsEvent) {
+
+		pgxBatch := &pgx.Batch{}
+
+
 		// Prepare the data for CopyFrom
-		rows := [][]interface{}{}
+		// rows := [][]interface{}{}
+		// for _, e := range batch {
+		// 	rows = append(rows, []interface{}{
+		// 		e.BlogID, e.Url, e.UserID, e.EventType, e.Timestamp, e.UserAgent, e.IPAddress,
+		// 	})
+		// }
+
 		for _, e := range batch {
-			rows = append(rows, []interface{}{
-				e.BlogID, e.Url, e.UserID, e.EventType, e.Timestamp, e.UserAgent, e.IPAddress,
-			})
+			// Normalize UserID for the Unique Constraint
+			uid := e.UserID
+			if uid == "" {
+				uid = "anon"
+			}
+
+
+			query := `
+						INSERT INTO analytics_events
+						(timestamp, blog_id, url, user_id, event_type, user_agent, ip_address)
+						VALUES ($1, $2, $3, $4, $5, $6, $7)
+						ON CONFLICT (blog_id, user_id, url, timestamp) DO NOTHING;
+					`
+
+			pgxBatch.Queue(query, e.Timestamp, e.BlogID, e.Url, uid, e.EventType, e.UserAgent, e.IPAddress)
+
 		}
 
-		// Bulk Insert
-		count, err := db.CopyFrom(
-			context.Background(),
-			pgx.Identifier{"analytics_events"},
-			[]string{"blog_id", "url", "user_id", "event_type", "timestamp", "user_agent", "ip_address"},
-			pgx.CopyFromRows(rows),
-		)
 
+		br := db.SendBatch(context.Background(), pgxBatch)
+		defer br.Close()
+
+
+		_, err := br.Exec()
 		if err != nil {
 			log.Printf("❌ Failed to insert batch: %v", err)
 			// Nuance: In production, you would push these back to a "Dead Letter Queue" in Redis
 		} else {
-			log.Printf("✅ Saved %d events to Postgres", count)
+			log.Printf("✅ Synced %d events to Postgres", len(batch))
 		}
 }
