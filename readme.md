@@ -1,87 +1,160 @@
-# 🚀 High-Throughput Distributed Analytics Engine
+# Analytics Engine
 
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?logo=docker&logoColor=white)
-![Redis](https://img.shields.io/badge/Redis-Queue-DC382D?logo=redis&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-NeonDB-336791?logo=postgresql&logoColor=white)
-![k6](https://img.shields.io/badge/k6-Load%20Tested-7D64FF?logo=k6&logoColor=white)
+High-throughput event ingestion and analytics pipeline built with Go, Redis, PostgreSQL, and Fiber.
 
-A high-concurrency event ingestion pipeline designed to handle massive traffic spikes. Built with **Golang**, this system uses an **asynchronous architecture** (API → Redis → Worker) to achieve sub-millisecond API latency while ensuring data consistency in **PostgreSQL**.
+## Overview
 
----
+The engine accepts analytics events over HTTP, buffers them through Redis, and persists them to PostgreSQL via asynchronous workers. A cron service maintains rolling aggregate tables that power the query API. Authentication is split between ingest (site-scoped public API keys) and query (JWT-based owner/member access).
 
-## 🏗️ Architecture
+## Services
 
-The system decouples **ingestion** from **processing** to ensure high availability and write speeds.
-
-```mermaid
-graph LR
-    User(Client / k6) -- HTTP POST --> LB[Load Balancer]
-    LB --> API1[Go API Replica 1]
-    LB --> API2[Go API Replica 2]
-    LB --> API3[Go API Replica 3]
-    API1 -- Async Push --> Redis[(Redis Queue)]
-    API2 -- Async Push --> Redis
-    API3 -- Async Push --> Redis
-    Redis -- Pop Batch --> Worker1[Go Background Worker]
-    Redis -- Pop Batch --> Worker2[Go Background Worker]
-    Redis -- Pop Batch --> Worker3[Go Background Worker]
-    Worker1 -- Bulk Insert --> DB[(Neon PostgreSQL
-    Raw Data Store - 24 hr)]
-    Worker2 -- Bulk Insert --> DB[(Neon PostgreSQL
-    Raw Data Store - 24 hr)]
-    Worker3 -- Bulk Insert --> DB[(Neon PostgreSQL
-    Raw Data Store - 24 hr)]
-    Cron2[Delete Cron Job] -- Clean up Cron Job --> DB
-    DB -- Cron Job --> Cron
-    Cron -- Aggregation --> DB2[(Hourly)]
-    Cron -- Aggregation --> DB3[(Monthly)]
-    Cron -- Aggregation --> DB4[(Daily)]
-    Cron -- Aggregation --> DB5[(Yearly)]   
-    
-```
-
-### Key Components
-- Ingestion API (Go): Lightweight HTTP server. Accepts JSON events, validates them, and pushes them instantly to a Redis List. Zero database blocking.
-- Message Queue (Redis): Acts as a shock absorber. Handles traffic spikes (e.g., 2k+ events/sec) without overwhelming the database.
-- Worker Service (Go): Consumes messages from Redis, batches them (e.g., 2000 events/batch), and performs efficient bulk inserts into PostgreSQL.
-- Cron Service: Handles periodic aggregation and cleanup tasks.
-
-### Performance BenchmarksTested on a local single-node environment (Consumer Laptop) using k6.
-
-| Metric | Single Instance | 3-Node Cluster (Optimized) | Description |
-| :--- | :--- | :--- | :--- |
-| **Throughput** | 1,578 Req/Sec | **1,626 Req/Sec** | Sustained load over 2 minutes. |
-| **Latency (p95)** | 5.45 ms | **1.23 ms** ⚡ | 95% of requests completed in < 1.3ms. |
-| **Reliability** | 100% | **100%** | Zero dropped requests under load. |
-| **Capacity** | 136M / Day | **140M+ / Day** | Extrapolated daily volume. |
-    
-    
-    
-## Tech Stack
-- **Language**: Golang (1.21+) 
-- **Database**: PostgreSQL (via Neon Serverless)
-- **Queue**: Redis 
-- **Containerization**: Docker & Docker Compose 
-- **Testing**: Grafana k6
+| Binary | Description |
+|--------|-------------|
+| `api` | HTTP ingestion and query service. Accepts events, queues them to Redis, and serves the query API. |
+| `worker` | Consumes events from Redis, validates and enriches them, persists raw and canonical facts, and maintains visitor/session state. |
+| `cron` | Rebuilds sliding canonical aggregates on a schedule and writes reconciliation results. |
+| `migrate` | Applies versioned SQL migrations from `infra/migrations/` in order. |
+| `backfill` | One-shot tool to manually rebuild aggregate windows from canonical events. |
 
 ## Project Structure
-``` bash
-.
-├── cmd/
-│   ├── api/          
-│   ├── worker/      
-│   └── cron/         
-├── internal/
-│   └── queue/        
-├── docker-compose.yml 
-├── Dockerfile        
-└── loadtest.js       
+
+```
+cmd/
+  api/       - Ingestion and query HTTP server
+  worker/    - Event processing consumer
+  cron/      - Aggregate rollup scheduler
+  migrate/   - Migration runner
+  backfill/  - Aggregate backfill tool
+
+internal/
+  analytics/ - Event normalization and payload types
+  auth/      - JWT issuance, ingest middleware, query middleware
+  metrics/   - In-process ingestion counters
+  query/     - Query API handlers (overview, realtime, pages, sources)
+  queue/     - Redis client, batcher, and enqueue logic
+  rollups/   - Aggregate build logic shared by cron and backfill
+
+infra/
+  migrations/ - Versioned SQL migration files
+  haproxy/    - HAProxy config for API load balancing
 ```
 
-## Future Improvements
-- **Batching**: Implement dynamic batching in the API layer for even higher throughput.
-- **Partitioning**: Use PostgreSQL partitioning for time-series data management.
+## Database Schema
 
-Author
-Agniva Sengupta Building scalable systems one goroutine at a time.
+Migrations are applied in order by the `migrate` service:
+
+| Migration | Description |
+|-----------|-------------|
+| `000001` | Legacy analytics schema (`analytics_events`, legacy rollup tables) |
+| `000002` | Canonical event tables (`raw_events`, `events`) |
+| `000003` | Identity and dead-letter tables (`visitors`, `sessions`, `dead_letter_events`) |
+| `000004` | Canonical aggregate tables (`agg_site_hourly`, `agg_site_daily`, `agg_page_daily`, `agg_source_daily`) |
+| `000005` | Aggregate work queue |
+| `000006` | Auth tables (`users`, `sites`, `api_keys`) |
+
+## API
+
+The HTTP API runs on port `8080`. See [`api-spec.md`](api-spec.md) for the full specification.
+
+### Authentication
+
+**Ingest** endpoints require a site-scoped public API key passed as a Bearer token. The key is hashed and validated against the `api_keys` table.
+
+**Query** endpoints require a JWT issued at login. The token encodes the user's accessible site IDs and is validated against the `JWT_SECRET` environment variable.
+
+### Endpoints
+
+**Auth**
+```
+POST /v1/auth/register
+POST /v1/auth/login
+```
+
+**Ingest** — requires ingest API key
+```
+POST /v1/ingest          Batch ingest (array of events)
+POST /v1/events          Single event ingest
+```
+
+**Query** — requires JWT
+```
+GET /v1/sites/:site_id/overview    Top-line metrics and time series
+GET /v1/sites/:site_id/realtime    Near-realtime activity (last 30 minutes)
+GET /v1/sites/:site_id/pages       Top pages for a date range
+GET /v1/sites/:site_id/sources     Traffic source breakdown
+```
+
+**Operational**
+```
+GET /health    Service health and queue depth
+GET /metrics   Ingestion counters and buffer state
+```
+
+### Event Schema
+
+Events follow the canonical v1 schema. Required fields:
+
+```json
+{
+  "event_id":   "evt_123",
+  "site_id":    "site_abc",
+  "visitor_id": "vis_1",
+  "session_id": "sess_1",
+  "event_name": "page_view",
+  "event_type": "page",
+  "occurred_at": "2026-04-04T12:30:00Z",
+  "page_url":   "https://example.com/posts/hello",
+  "page_path":  "/posts/hello"
+}
+```
+
+Product-specific fields (`post_id`, `author_id`, etc.) go inside a `properties` object. `occurred_at` must be RFC3339 UTC.
+
+## Local Setup
+
+Copy the example environment file and adjust values as needed:
+
+```bash
+cp .env.example .env
+```
+
+**Environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `DB_DSN` | PostgreSQL connection string |
+| `REDIS_DSN` | Redis connection string |
+| `JWT_SECRET` | Secret used to sign and verify JWTs |
+
+Start everything with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Run migrations only:
+
+```bash
+docker compose run --rm migrate
+```
+
+## Backfill
+
+Rebuild all aggregate windows for a time range:
+
+```bash
+go run ./cmd/backfill -from 2026-04-01T00:00:00Z -to 2026-04-08T00:00:00Z
+```
+
+Rebuild specific aggregate builders only:
+
+```bash
+go run ./cmd/backfill -builders agg_site_daily,agg_page_daily -from 2026-04-01T00:00:00Z -to 2026-04-08T00:00:00Z
+```
+
+## Operational Notes
+
+- Raw events are retained for 24 hours. Range queries beyond that depend on aggregate tables.
+- A `202 Accepted` response from the ingest endpoint means the event was queued; persistence depends on the worker keeping up with queue drain.
+- Dead-lettered events (validation failures) are written to `dead_letter_events` and are not retried automatically.
+- Duplicate events with the same `(site_id, event_id)` pair are deduplicated by the worker before affecting analytics counts.

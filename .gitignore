@@ -9,6 +9,9 @@
 /cmd/worker/worker.exe
 /cmd/cron/cron.exe
 
+*_test.go
+*grpc*
+
 *.exe
 *.test
 *.prof
@@ -20,5 +23,11 @@
 
 .vscode/
 
-loadtest.js
-loadtest-5k.js
+loadtest*.js
+
+api-spec.md
+architecture.md
+auth_design.md
+
+.gocache/
+benchmarks/
