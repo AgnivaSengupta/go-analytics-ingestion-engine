@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -16,6 +19,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -29,6 +33,23 @@ type RegisterRequest struct {
 	Name     string `json:"name"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+type CreateApiKeyRequest struct {
+	Name   string `json:"name"`
+	SiteID string `json:"site_id"`
+}
+
+type RevokeApiKeyRequest struct {
+	KeyID string `json:"key_id"`
+}
+
+type ApiKeyResponse struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	SiteID    string    `json:"site_id"`
+	KeyType   string    `json:"key_type"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func main() {
@@ -82,7 +103,7 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 
 	// auth api
 	app.Post("/v1/auth/login", func(c *fiber.Ctx) error { return handleLogin(c, db, jwtSecret) })
-	app.Post("/v1/auth/register", func(c *fiber.Ctx) error { return handleRegister(c, db)})
+	app.Post("/v1/auth/register", func(c *fiber.Ctx) error { return handleRegister(c, db) })
 
 	// ingest api
 	ingest := app.Group("/v1", auth.IngestAuthMiddleware(db))
@@ -95,6 +116,13 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	sites.Get("/sites/:site_id/realtime", func(c *fiber.Ctx) error { return handleRealtime(c, db) })
 	sites.Get("/sites/:site_id/pages", func(c *fiber.Ctx) error { return handlePages(c, db) })
 	sites.Get("/sites/:site_id/sources", func(c *fiber.Ctx) error { return handleSources(c, db) })
+
+	// api_key management
+	sites.Post("/create-api-key", func(c *fiber.Ctx) error { return handleCreateApiKey(c, db) })
+	sites.Get("/api-keys", func(c *fiber.Ctx) error { return handleGetAllApiKeys(c, db) })
+	sites.Put("/revoke-api-key", func(c *fiber.Ctx) error { return handleRevokeApiKey(c, db) })
+
+	//
 
 	return app
 }
@@ -402,4 +430,158 @@ func handleSources(c *fiber.Ctx, db *pgxpool.Pool) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(result)
+}
+
+func generateApiKey() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(bytes), nil
+}
+
+func hashAPIKey(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func handleCreateApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized-invalid claims"})
+	}
+
+	userId := claims.UserID
+	if userId == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized- Missing user ID"})
+	}
+
+	var req CreateApiKeyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
+	}
+
+	if req.SiteID == "" || req.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name and site_id are required"})
+	}
+
+	var hasAccess bool
+	if err := db.QueryRow(
+		context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM sites WHERE id = $1 AND user_id = $2)`,
+		req.SiteID,
+		userId,
+	).Scan(&hasAccess); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !hasAccess {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "site does not belong to the authenticated user"})
+	}
+
+	keyStr, err := generateApiKey()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to generate API key"})
+	}
+	keyHash := hashAPIKey(keyStr)
+
+	var keyID string
+	err = db.QueryRow(context.Background(),
+		`INSERT INTO api_keys (site_id, user_id, key_hash, name, created_at, revoked_at) VALUES ($1, $2, $3, $4, Now(), NULL) RETURNING id`,
+		req.SiteID, userId, keyHash, req.Name,
+	).Scan(&keyID)
+
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "an active API key already exists for this site and user",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":      keyID,
+		"name":    req.Name,
+		"api_key": keyStr,
+		"message": "Please save this API key now. You will not be able to see it again.",
+	})
+}
+
+func handleGetAllApiKeys(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	userId := claims.UserID
+	rows, err := db.Query(context.Background(),
+		`SELECT id, name, site_id, key_type, created_at FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL`,
+		userId,
+	)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch API keys"})
+	}
+
+	defer rows.Close()
+
+	var keys []ApiKeyResponse
+	for rows.Next() {
+		var k ApiKeyResponse
+		if err := rows.Scan(&k.ID, &k.Name, &k.SiteID, &k.KeyType, &k.CreatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database scan error"})
+		}
+
+		keys = append(keys, k)
+	}
+
+	if err := rows.Err(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database row error"})
+	}
+
+	if keys == nil {
+		keys = []ApiKeyResponse{}
+	}
+
+	return c.JSON(fiber.Map{
+		"api_keys": keys,
+	})
+}
+
+func handleRevokeApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	userId := claims.UserID
+
+	var req RevokeApiKeyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
+	}
+
+	if req.KeyID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "key_id is required"})
+	}
+
+	command, err := db.Exec(context.Background(),
+		`UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+		req.KeyID, userId,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to revoke API key"})
+	}
+
+	if command.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "API key not found or already revoked"})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "API key successfully revoked",
+	})
 }
