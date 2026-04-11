@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS sites (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),       
     name        TEXT NOT NULL,
     user_id     UUID NOT NULL REFERENCES users(id),         
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at  TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (

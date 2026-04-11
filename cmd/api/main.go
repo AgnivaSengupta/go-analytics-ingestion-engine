@@ -52,6 +52,16 @@ type ApiKeyResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type CreateSiteRequest struct {
+	Name string `json:"name"`
+}
+
+type SiteResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
 func main() {
 
 	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
@@ -122,7 +132,10 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	sites.Get("/api-keys", func(c *fiber.Ctx) error { return handleGetAllApiKeys(c, db) })
 	sites.Put("/revoke-api-key", func(c *fiber.Ctx) error { return handleRevokeApiKey(c, db) })
 
-	//
+	// site management
+	sites.Post("/", func(c *fiber.Ctx) error { return handleCreateSite(c, db) })
+	sites.Get("/", func(c *fiber.Ctx) error { return handleListSites(c, db) })
+	sites.Delete("/:id", func(c *fiber.Ctx) error { return handleDeleteSite(c, db) })
 
 	return app
 }
@@ -584,4 +597,124 @@ func handleRevokeApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
 	return c.JSON(fiber.Map{
 		"message": "API key successfully revoked",
 	})
+}
+
+func handleCreateSite(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthoried"})
+	}
+
+	var req CreateSiteRequest
+	if err := c.BodyParser(&req); err != nil {
+		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
+	}
+
+	if req.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "site name is required"})
+	}
+
+	var site SiteResponse
+
+	err := db.QueryRow(context.Background(),
+		`INSERT INTO sites (name, user_id, created_at) VALUES ($1, $2, NOE()) RETURNING id, name, created_at`,
+		req.Name, claims.UserID,
+	).Scan(&site.ID, &site.Name, &site.CreatedAt)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create site"})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(site)
+}
+
+func handleListSites(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	rows, err := db.Query(context.Background(),
+		`SELECT id, name, created_at FROM sites WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
+		claims.UserID,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch sites"})
+	}
+
+	defer rows.Close()
+
+	var sites []SiteResponse
+	for rows.Next() {
+		var s SiteResponse
+
+		if err := rows.Scan(&s.ID, &s.Name, &s.CreatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database scan error"})
+		}
+
+		sites = append(sites, s)
+	}
+
+	if err := rows.Err(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database row error"})
+	}
+
+	if sites == nil {
+		sites = []SiteResponse{}
+	}
+
+	return c.JSON(fiber.Map{
+		"sites": sites,
+	})
+}
+
+func handleDeleteSite(c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	siteID := c.Params("id")
+	if siteID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "site ID is required"})
+	}
+
+	ctx := context.Background()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to start the transaction"})
+	}
+
+	defer tx.Rollback(ctx)
+	// soft delete
+	commandTag, err := db.Exec(context.Background(),
+		`UPDATE sites SET deleted_at = NOW() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+		siteID, claims.UserID,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete site"})
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "site not found or already deleted"})
+	}
+
+	// 3. Revoke all active API keys associated with this site
+	_, err = tx.Exec(ctx,
+		`UPDATE api_keys SET revoked_at = NOW() WHERE site_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+		siteID, claims.UserID,
+	)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to revoke associated API keys"})
+	}
+
+	// 4. Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to finalize deletion"})
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+
 }
