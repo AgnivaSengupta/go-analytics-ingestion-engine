@@ -62,6 +62,10 @@ type SiteResponse struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 func main() {
 
 	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
@@ -114,6 +118,8 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	// auth api
 	app.Post("/v1/auth/login", func(c *fiber.Ctx) error { return handleLogin(c, db, jwtSecret) })
 	app.Post("/v1/auth/register", func(c *fiber.Ctx) error { return handleRegister(c, db) })
+	app.Post("/v1/auth/refresh", func(c *fiber.Ctx) error { return handleRefresh(c, db, jwtSecret) })
+	app.Post("/v1/auth/logout", func(c *fiber.Ctx) error { return handleLogout(c, db) } )
 
 	// ingest api
 	ingest := app.Group("/v1", auth.IngestAuthMiddleware(db))
@@ -175,6 +181,69 @@ func metricsHandler(c *fiber.Ctx) error {
 	})
 }
 
+func handleRefresh(c *fiber.Ctx, db *pgxpool.Pool, jwtSecret []byte) error {
+	var req RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid json body"})
+	}
+
+	tokenHash := hashAPIKey(req.RefreshToken)
+	var userID string
+	var expiresAt time.Time
+
+	err := db.QueryRow(context.Background(),
+		`SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
+		tokenHash,
+	).Scan(&userID, &expiresAt)
+
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid or revoked refresh token"})
+	}
+
+	if time.Now().After(expiresAt) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "refresh token expired, please log in again"})
+	}
+
+	rows, _ := db.Query(context.Background(), `SELECT id FROM sites WHERE user_id = $1`, userID)
+	defer rows.Close()
+	var siteIDs []string
+	for rows.Next() {
+		var siteID string
+		rows.Scan(&siteID)
+		siteIDs = append(siteIDs, siteID)
+	}
+
+	// new access token
+	newAccessToken, _ := auth.IssueToken(jwtSecret, userID, siteIDs, 15*time.Minute)
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"access_token": newAccessToken,
+		"token_type":   "Bearer",
+	})
+}
+
+func handleLogout(c *fiber.Ctx, db *pgxpool.Pool) error {
+	var req RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid json body"})
+	}
+
+	tokenHash := hashAPIKey(req.RefreshToken)
+	_, err := db.Exec(context.Background(),
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL`,
+		tokenHash,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	// We return 200 OK even if the token wasn't found (idempotent logout)
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "logged out successfully",
+	})
+}
+
 func handleLogin(c *fiber.Ctx, db *pgxpool.Pool, jwtSecret []byte) error {
 	var req AuthRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -221,14 +290,36 @@ func handleLogin(c *fiber.Ctx, db *pgxpool.Pool, jwtSecret []byte) error {
 		return err
 	}
 
-	tokenString, err := auth.IssueToken(jwtSecret, userID, siteIDs, 1*time.Hour)
+	// access token
+	tokenString, err := auth.IssueToken(jwtSecret, userID, siteIDs, 15*time.Minute)
+
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(auth.ApiErr("server_error", "failed to generate token"))
+		return c.Status(fiber.StatusInternalServerError).JSON(auth.ApiErr("server_error", "failed to generate access token"))
+	}
+
+	// refresh token
+	refreshToken, err := generateApiKey()
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(auth.ApiErr("server_error", "failed to generate refresh token"))
+	}
+
+	refreshTokenHash := hashAPIKey(refreshToken)
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+
+	_, err = db.Exec(context.Background(),
+		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+		userID, refreshTokenHash, expiresAt,
+	)
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to insert refresh token"})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"access_token": tokenString,
-		"token_type":   "Bearer",
+		"access_token":  tokenString,
+		"refresh_token": refreshToken,
+		"token_type":    "Bearer",
 	})
 }
 
