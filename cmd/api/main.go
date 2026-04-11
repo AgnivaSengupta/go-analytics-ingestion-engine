@@ -108,7 +108,7 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,OPTIONS",
-		AllowHeaders: "Origin, Content-Type, Accept, User-Agent",
+		AllowHeaders: "Origin, Content-Type, Accept, User-Agent, Authorization",
 	}))
 
 	app.Static("/tracker.js", "./sdk/tracker/tracker.js")
@@ -414,6 +414,9 @@ func handleNormalizedPayload(c *fiber.Ctx, payload analytics.Payload) error {
 	rejected := make([]fiber.Map, 0)
 	for i := range payload.Events {
 		event := &payload.Events[i]
+		if err := auth.AssertSiteScope(c, event.SiteID); err != nil {
+			return c.Status(fiber.StatusForbidden).JSON(auth.ApiErr("forbidden", err.Error()))
+		}
 		if err := normalizeEvent(event, clientIP, userAgent, now); err != nil {
 			rejected = append(rejected, fiber.Map{
 				"index": i,
