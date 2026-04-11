@@ -4,19 +4,29 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func GetRealtime(ctx context.Context, db *pgxpool.Pool, siteID string) (*RealtimeResult, error) {
+	return getRealtime(ctx, db, siteID, time.Now().UTC())
+}
+
+type realtimeQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func getRealtime(ctx context.Context, db realtimeQuerier, siteID string, now time.Time) (*RealtimeResult, error) {
 	res := &RealtimeResult{
 		SiteID:        siteID,
 		WindowMinutes: 30,
 		TopPages:      []RealtimePage{},
 		TopReferrers:  []RealtimeReferrer{},
-		GeneratedAt:   time.Now().UTC(),
+		GeneratedAt:   now.UTC(),
 	}
 
-	cutoff := time.Now().UTC().Add(-30 * time.Minute)
+	cutoff := now.UTC().Add(-30 * time.Minute)
 
 	// Quick stats
 	statsQuery := `
@@ -27,11 +37,13 @@ func GetRealtime(ctx context.Context, db *pgxpool.Pool, siteID string) (*Realtim
 		FROM events
 		WHERE site_id = $1 AND occurred_at >= $2
 	`
-	_ = db.QueryRow(ctx, statsQuery, siteID, cutoff).Scan(
+	if err := db.QueryRow(ctx, statsQuery, siteID, cutoff).Scan(
 		&res.ActiveVisitors,
 		&res.RecentPageviews,
 		&res.RecentEvents,
-	)
+	); err != nil {
+		return nil, err
+	}
 
 	// Top pages
 	pagesQuery := `
@@ -42,7 +54,10 @@ func GetRealtime(ctx context.Context, db *pgxpool.Pool, siteID string) (*Realtim
 		ORDER BY 2 DESC
 		LIMIT 10
 	`
-	pRows, _ := db.Query(ctx, pagesQuery, siteID, cutoff)
+	pRows, err := db.Query(ctx, pagesQuery, siteID, cutoff)
+	if err != nil {
+		return nil, err
+	}
 	defer pRows.Close()
 	for pRows.Next() {
 		var p RealtimePage
@@ -60,7 +75,10 @@ func GetRealtime(ctx context.Context, db *pgxpool.Pool, siteID string) (*Realtim
 		ORDER BY 2 DESC
 		LIMIT 10
 	`
-	rRows, _ := db.Query(ctx, refQuery, siteID, cutoff)
+	rRows, err := db.Query(ctx, refQuery, siteID, cutoff)
+	if err != nil {
+		return nil, err
+	}
 	defer rRows.Close()
 	for rRows.Next() {
 		var r RealtimeReferrer

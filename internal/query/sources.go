@@ -12,6 +12,9 @@ func GetSources(ctx context.Context, db *pgxpool.Pool, siteID string, from, to t
 		limit = 100
 	}
 
+	liveStart := liveWindowStart("day", time.Now().UTC())
+	aggregateTo := aggregateWindowEnd(to, liveStart)
+
 	res := &SourcesResult{
 		SiteID: siteID,
 		Range: TimeRange{
@@ -35,8 +38,7 @@ func GetSources(ctx context.Context, db *pgxpool.Pool, siteID string, from, to t
 				COUNT(DISTINCT visitor_id) AS visitors,
 				COUNT(DISTINCT session_id) AS sessions
 			FROM events
-			WHERE site_id = $1 AND occurred_at >= $2 AND occurred_at < $3
-			  AND occurred_at >= date_trunc('day', NOW())
+			WHERE site_id = $1 AND occurred_at >= $4 AND occurred_at < $5
 			GROUP BY 1, 2, 3, 4
 		)
 		SELECT source, medium, campaign, referrer_host, SUM(visitors) as v, SUM(sessions) as s
@@ -46,7 +48,7 @@ func GetSources(ctx context.Context, db *pgxpool.Pool, siteID string, from, to t
 		LIMIT $4
 	`
 
-	rows, err := db.Query(ctx, query, siteID, from, to, limit)
+	rows, err := db.Query(ctx, query, siteID, from, aggregateTo, liveStart, to, limit)
 	if err != nil {
 		return nil, err
 	}

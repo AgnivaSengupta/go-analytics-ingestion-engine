@@ -8,6 +8,10 @@ import (
 )
 
 func GetOverview(ctx context.Context, db *pgxpool.Pool, siteID string, from, to time.Time, interval string) (*OverviewResult, error) {
+	now := time.Now().UTC()
+	liveStart := liveWindowStart(interval, now)
+	aggregateTo := aggregateWindowEnd(to, liveStart)
+
 	result := &OverviewResult{
 		SiteID: siteID,
 		Range: TimeRange{
@@ -34,8 +38,7 @@ func GetOverview(ctx context.Context, db *pgxpool.Pool, siteID string, from, to 
 					COUNT(DISTINCT visitor_id) AS visitors,
 					COUNT(DISTINCT session_id) AS sessions
 				FROM events
-				WHERE site_id = $1 AND occurred_at >= $2 AND occurred_at < $3
-				  AND occurred_at >= date_trunc('day', NOW())
+				WHERE site_id = $1 AND occurred_at >= $4 AND occurred_at < $5
 				GROUP BY 1
 			)
 			SELECT bucket_start, SUM(pageviews), SUM(visitors), SUM(sessions)
@@ -55,8 +58,7 @@ func GetOverview(ctx context.Context, db *pgxpool.Pool, siteID string, from, to 
 					COUNT(DISTINCT visitor_id) AS visitors,
 					COUNT(DISTINCT session_id) AS sessions
 				FROM events
-				WHERE site_id = $1 AND occurred_at >= $2 AND occurred_at < $3
-				  AND occurred_at >= date_trunc('hour', NOW())
+				WHERE site_id = $1 AND occurred_at >= $4 AND occurred_at < $5
 				GROUP BY 1
 			)
 			SELECT bucket_start, SUM(pageviews), SUM(visitors), SUM(sessions)
@@ -66,7 +68,7 @@ func GetOverview(ctx context.Context, db *pgxpool.Pool, siteID string, from, to 
 		`
 	}
 
-	rows, err := db.Query(ctx, query, siteID, from, to)
+	rows, err := db.Query(ctx, query, siteID, from, aggregateTo, liveStart, to)
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +80,17 @@ func GetOverview(ctx context.Context, db *pgxpool.Pool, siteID string, from, to 
 		if err := rows.Scan(&ts.BucketStart, &pv, &v, &s); err != nil {
 			return nil, err
 		}
-		if pv != nil { ts.Pageviews = *pv }
-		if v != nil { ts.Visitors = *v }
-		if s != nil { ts.Sessions = *s }
+		if pv != nil {
+			ts.Pageviews = *pv
+		}
+		if v != nil {
+			ts.Visitors = *v
+		}
+		if s != nil {
+			ts.Sessions = *s
+		}
 		result.Timeseries = append(result.Timeseries, ts)
-		
+
 		result.Totals.Pageviews += ts.Pageviews
 		result.Totals.Visitors += ts.Visitors // note: accurate totals need count distinct, approximating here or via sessions
 	}

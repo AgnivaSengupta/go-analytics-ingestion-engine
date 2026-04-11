@@ -103,7 +103,7 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 		AppName:   "Analytics_Ingestion_Engine",
 		BodyLimit: 4 * 1024 * 1024,
 	})
-
+	
 	app.Use(recover.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
@@ -111,6 +111,8 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 		AllowHeaders: "Origin, Content-Type, Accept, User-Agent",
 	}))
 
+	app.Static("/tracker.js", "./sdk/tracker/tracker.js")
+	
 	app.Get("/health", healthHandler)
 	app.Get("/metrics", metricsHandler)
 	// app.Post("/api/ingest", handleIngest)
@@ -204,7 +206,11 @@ func handleRefresh(c *fiber.Ctx, db *pgxpool.Pool, jwtSecret []byte) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "refresh token expired, please log in again"})
 	}
 
-	rows, _ := db.Query(context.Background(), `SELECT id FROM sites WHERE user_id = $1`, userID)
+	rows, err := db.Query(context.Background(), `SELECT id FROM sites WHERE user_id = $1`, userID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error" : "failed to fetch sites from the db"})
+	}
+	
 	defer rows.Close()
 	var siteIDs []string
 	for rows.Next() {
@@ -708,7 +714,7 @@ func handleCreateSite(c *fiber.Ctx, db *pgxpool.Pool) error {
 	var site SiteResponse
 
 	err := db.QueryRow(context.Background(),
-		`INSERT INTO sites (name, user_id, created_at) VALUES ($1, $2, NOE()) RETURNING id, name, created_at`,
+		`INSERT INTO sites (name, user_id, created_at) VALUES ($1, $2, NOW()) RETURNING id, name, created_at`,
 		req.Name, claims.UserID,
 	).Scan(&site.ID, &site.Name, &site.CreatedAt)
 
@@ -779,7 +785,7 @@ func handleDeleteSite(c *fiber.Ctx, db *pgxpool.Pool) error {
 
 	defer tx.Rollback(ctx)
 	// soft delete
-	commandTag, err := db.Exec(context.Background(),
+	commandTag, err := tx.Exec(context.Background(),
 		`UPDATE sites SET deleted_at = NOW() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		siteID, claims.UserID,
 	)
