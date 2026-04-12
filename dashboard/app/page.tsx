@@ -1,94 +1,186 @@
-import Link from "next/link";
+"use client";
+import Header from "@/components/Header";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useAuth } from "@/context/AuthContext";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
+// import Link from "next/link";
+import { useState } from "react";
 
 export default function LandingPage() {
+  const { login, register } = useAuth();
+  const router = useRouter();
+
+  const [isLogin, setIsLogin] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  // const [error, setError] = useState("");
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // TODO: Connect this to your Go API authentication endpoints
+    // console.log(isLogin ? "Logging in..." : "Signing up...");
+    setLoading(true);
+    try {
+      if (isLogin) {
+        await login(email, password);
+        router.push("/sites");
+      } else {
+        await register(name, email, password);
+        router.push("/sites");
+      }
+    } catch (error) {
+      console.log("[Error]: ", error);
+      // setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <main className="min-h-screen relative selection:bg-foreground selection:text-background flex flex-col">
-      {/* Optional: Subtle SVG Noise Texture Overlay 
-        This gives the dark background a tactile, premium feel 
-      */}
-      <div 
-        className="pointer-events-none fixed inset-0 z-50 opacity-[0.03]"
-        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")` }}
-      />
+    <>
+      <div className="fixed inset-0 w-full h-full -z-10">
+        <Image
+          src="/Bg-image.png"
+          alt="Misty mountain"
+          fill
+          priority
+          className="object-cover object-center -z-10"
+        />
+      </div>
+      <main className="relative w-full min-h-[100dvh] flex flex-col overflow-hidden">
+          <Header />
+          <div className="max-w-7xl mx-auto mt-20 flex flex-col gap-4 text-center">
+            <div className="rounded-full bg-blue-50 w-fit mx-auto py-1 px-5">
+              <p className="text-sm text-zinc-900">
+                A High-Throughput Analytics Pipeline
+              </p>
+            </div>
 
-      {/* Navigation */}
-      <nav className="w-full flex items-center justify-between p-6 md:p-12 z-10">
-        <div className="font-sans font-medium tracking-tight text-sm flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-foreground animate-pulse" />
-          Analytics Engine
-        </div>
-        <div className="flex gap-6 items-center text-sm">
-          <Link href="https://github.com/AgnivaSengupta/go-analytics-ingestion-engine" target="_blank" className="text-muted hover:text-foreground transition-colors">
-            Architecture
-          </Link>
-          <Link href="/login" className="border border-border px-4 py-2 hover:bg-foreground hover:text-background transition-colors duration-300">
-            Developer Login
-          </Link>
-        </div>
-      </nav>
+            <div className="flex flex-col gap-2 font-serif tracking-wide">
+              <h1 className=" text-7xl">Measure everything.</h1>
+              <h2 className="text-6xl text-zinc-500">Wait for nothing.</h2>
+            </div>
 
-      {/* Hero Section */}
-      <section className="flex-1 flex flex-col justify-center px-6 md:px-12 z-10 mt-12 md:mt-0">
-        <div className="max-w-4xl">
-          <h2 className="text-muted font-sans text-sm tracking-widest uppercase mb-6 border-l border-border pl-4">
-            High-Throughput Ingestion Pipeline
-          </h2>
-          
-          <h1 className="font-serif text-6xl md:text-8xl leading-[0.9] tracking-tight mb-8">
-            Measure <br className="hidden md:block" />
-            Everything. <br />
-            <span className="text-muted">Wait for nothing.</span>
-          </h1>
-          
-          <p className="font-sans text-muted max-w-xl text-lg md:text-xl leading-relaxed mb-12">
-            A distributed analytics ingestion engine engineered in Go. Utilizing a Redis buffer queue and PostgreSQL background workers to process thousands of events per second with sub-10ms API latency.
-          </p>
+            <p className="max-w-3xl tracking-wide text-base text-zinc-600 my-4">
+              An open-source data ingestion engine engineered in Go. Decoupling
+              HTTP reception from database persistence to process thousands of
+              events per second with sub-10ms API latency.
+            </p>
 
-          <div className="flex flex-col sm:flex-row gap-4">
-            <Link 
-              href="/sites/demo/overview" 
-              className="bg-foreground text-background px-8 py-4 font-medium text-sm flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
-            >
-              View Demo Dashboard
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" strokeLinejoin="miter">
-                <path d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </Link>
-            <Link 
-              href="https://github.com/AgnivaSengupta/go-analytics-ingestion-engine" 
-              target="_blank"
-              className="border border-border px-8 py-4 font-medium text-sm text-center hover:bg-border/50 transition-colors"
-            >
-              View GitHub Repo
-            </Link>
+            <div className="flex items-center mx-auto">
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button
+                    size="lg"
+                    className="px-10 py-6 text-xl font-serif rounded-lg cursor-pointer bg-zinc-900 text-white hover:bg-zinc-800 transition-colors"
+                  >
+                    Get started
+                  </Button>
+                </DialogTrigger>
+
+                <DialogContent className="sm:max-w-[400px] p-8">
+                  <DialogHeader className="text-left mb-4">
+                    <DialogTitle className="font-serif text-3xl text-zinc-900">
+                      {isLogin ? "Welcome back" : "Create an account"}
+                    </DialogTitle>
+                    <DialogDescription className="text-zinc-500 text-sm">
+                      {isLogin
+                        ? "Enter your credentials to access your dashboard."
+                        : "Sign up to start tracking your events in real-time."}
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+                    {!isLogin && (
+                      <div className="flex flex-col gap-2 text-left">
+                        <Label htmlFor="name" className="text-zinc-700 text-sm">
+                          Full Name
+                        </Label>
+                        <Input
+                          id="name"
+                          type="text"
+                          placeholder="User Name"
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          required
+                          className="focus-visible:ring-zinc-900 text-sm"
+                        />
+                      </div>
+                    )}
+
+                    <div className="flex flex-col gap-2 text-left">
+                      <Label htmlFor="email" className="text-zinc-700 text-sm">
+                        Email Address
+                      </Label>
+                      <Input
+                        id="email"
+                        type="email"
+                        placeholder="john@example.com"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        className="focus-visible:ring-zinc-900 text-sm"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2 text-left">
+                      <Label
+                        htmlFor="password"
+                        className="text-zinc-700 text-sm"
+                      >
+                        Password
+                      </Label>
+                      <Input
+                        id="password"
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                        className="focus-visible:ring-zinc-900 text-sm"
+                      />
+                    </div>
+
+                    <Button
+                      type="submit"
+                      size="lg"
+                      className="w-full mt-1 bg-zinc-900 text-sm py-4 text-white hover:bg-zinc-800 cursor-pointer"
+                      disabled={loading}
+                    >
+                      {isLogin ? "Log In" : "Sign Up"}
+                    </Button>
+                  </form>
+
+                  <div className="text-center mt-6 text-sm text-zinc-500">
+                    {isLogin
+                      ? "Don't have an account? "
+                      : "Already have an account? "}
+                    <button
+                      type="button"
+                      onClick={() => setIsLogin(!isLogin)}
+                      className="text-zinc-900 font-medium underline underline-offset-4 hover:text-zinc-600 transition-colors cursor-pointer"
+                    >
+                      {isLogin ? "Sign up" : "Log in"}
+                    </button>
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
           </div>
-        </div>
-      </section>
-
-      {/* Metrics / Features Grid */}
-      <section className="grid grid-cols-1 md:grid-cols-3 border-t border-border z-10 mt-24">
-        <div className="p-6 md:p-12 border-b md:border-b-0 md:border-r border-border">
-          <div className="font-sans text-muted text-xs uppercase tracking-widest mb-4">Ingestion Target</div>
-          <div className="font-serif text-5xl md:text-6xl mb-2">5,000<span className="text-2xl text-muted font-sans"> /sec</span></div>
-          <p className="text-sm text-muted">Sustained event processing capability powered by non-blocking Go Fiber routines.</p>
-        </div>
         
-        <div className="p-6 md:p-12 border-b md:border-b-0 md:border-r border-border">
-          <div className="font-sans text-muted text-xs uppercase tracking-widest mb-4">API Latency</div>
-          <div className="font-serif text-5xl md:text-6xl mb-2">&lt; 15<span className="text-2xl text-muted font-sans"> ms</span></div>
-          <p className="text-sm text-muted">p95 response time achieved by decoupling HTTP ingestion from database persistence.</p>
-        </div>
-
-        <div className="p-6 md:p-12 bg-border/10">
-          <div className="font-sans text-muted text-xs uppercase tracking-widest mb-4">Architecture</div>
-          <ul className="text-sm space-y-3 font-mono text-muted">
-            <li className="flex justify-between border-b border-border/50 pb-2"><span>API Server</span> <span className="text-foreground">Go / Fiber</span></li>
-            <li className="flex justify-between border-b border-border/50 pb-2"><span>Buffer</span> <span className="text-foreground">Redis</span></li>
-            <li className="flex justify-between border-b border-border/50 pb-2"><span>Persistence</span> <span className="text-foreground">PostgreSQL</span></li>
-            <li className="flex justify-between"><span>Dashboard</span> <span className="text-foreground">Next.js</span></li>
-          </ul>
-        </div>
-      </section>
-    </main>
+      </main>
+    </>
   );
 }
