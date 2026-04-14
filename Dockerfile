@@ -3,7 +3,10 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+COPY cmd ./cmd
+COPY internal ./internal
+COPY infra/migrations ./infra/migrations
+COPY sdk ./sdk
 
 # Build API
 RUN go build -o /bin/api ./cmd/api
@@ -21,6 +24,7 @@ FROM alpine:latest AS api
 WORKDIR /root/
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /bin/api .
+COPY --from=builder /app/sdk ./sdk
 EXPOSE 8080
 CMD ["./api"]
 
@@ -40,16 +44,15 @@ COPY --from=builder /app/infra/migrations ./infra/migrations
 CMD ["./migrate"]
 
 # Final CRON image
-FROM alpine:latest as cron
+FROM alpine:latest AS cron
 WORKDIR /root/
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /bin/cron .
 CMD ["./cron"]
 
 # Final aggregate backfill image
-FROM alpine:latest as backfill
+FROM alpine:latest AS backfill
 WORKDIR /root/
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /bin/backfill .
 CMD ["./backfill"]
-

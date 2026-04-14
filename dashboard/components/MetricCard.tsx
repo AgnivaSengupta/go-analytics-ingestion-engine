@@ -4,7 +4,7 @@ import React from "react";
 
 interface MetricCardProps {
   title: string;
-  value: string;
+  value: number | undefined;
   trend: number;
   trendDirection: "up" | "down";
   trendText: string;

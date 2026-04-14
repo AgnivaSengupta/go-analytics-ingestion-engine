@@ -37,7 +37,7 @@ const data = [
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
     return (
-      <div className="bg-white px-4 py-3 border border-gray-100 rounded-xl shadow-lg text-sm flex flex-col gap-2 min-w-[160px]">
+      <div className="bg-white px-4 py-3 border border-gray-100 rounded-xl shadow-lg text-sm flex flex-col gap-2 min-w-[250px]">
         <div className="flex items-center gap-2 text-gray-800 font-medium pb-1 border-b border-gray-50 mb-1">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500">
             <rect width="18" height="18" x="3" y="4" rx="2" ry="2" />
@@ -56,7 +56,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
              <span className="w-2.5 h-2.5 rounded-sm bg-indigo-600"></span>
-             <span className="text-gray-500">Organic</span>
+             <span className="text-gray-500">Page views</span>
           </div>
           <span className="font-semibold text-gray-800">
             {payload[0].value.toLocaleString()}k
@@ -65,7 +65,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
         <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
              <span className="w-2.5 h-2.5 rounded-sm bg-emerald-400"></span>
-             <span className="text-gray-500">Referral</span>
+             <span className="text-gray-500">Visitors</span>
           </div>
           <span className="font-semibold text-gray-800">
             {payload[1].value.toLocaleString()}k

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"time"
 
@@ -54,16 +55,28 @@ type ApiKeyResponse struct {
 
 type CreateSiteRequest struct {
 	Name string `json:"name"`
+	Url  string `json:"url"`
 }
 
 type SiteResponse struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Url       string    `json:"url"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
+}
+
+type ProfileRequest struct {
+	AccessToken string	`json:"access_token"`
+}
+
+type ProfileResponse struct {
+	UserName	string	`json:"user_name"`
+	// ProfilePic	string	`json:"profile_pic"`
+	Authenticated bool	`json:"authenticated"`
 }
 
 func main() {
@@ -103,7 +116,7 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 		AppName:   "Analytics_Ingestion_Engine",
 		BodyLimit: 4 * 1024 * 1024,
 	})
-	
+
 	app.Use(recover.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
@@ -112,7 +125,7 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	}))
 
 	app.Static("/tracker.js", "./sdk/tracker/tracker.js")
-	
+
 	app.Get("/health", healthHandler)
 	app.Get("/metrics", metricsHandler)
 	// app.Post("/api/ingest", handleIngest)
@@ -121,11 +134,12 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	app.Post("/v1/auth/login", func(c *fiber.Ctx) error { return handleLogin(c, db, jwtSecret) })
 	app.Post("/v1/auth/register", func(c *fiber.Ctx) error { return handleRegister(c, db) })
 	app.Post("/v1/auth/refresh", func(c *fiber.Ctx) error { return handleRefresh(c, db, jwtSecret) })
-	app.Post("/v1/auth/logout", func(c *fiber.Ctx) error { return handleLogout(c, db) } )
+	app.Post("/v1/auth/logout", func(c *fiber.Ctx) error { return handleLogout(c, db) })
+	app.Get("/v1/auth/me", auth.QueryAuthMiddleware(jwtSecret), func(c *fiber.Ctx) error {return handleAuthMe(c, db)})
 
 	// ingest api
-	ingest := app.Group("/v1", auth.IngestAuthMiddleware(db))
-	ingest.Post("/ingest", handleIngest)
+	ingest := app.Group("/v1/ingest", auth.IngestAuthMiddleware(db))
+	ingest.Post("/", handleIngest)
 	ingest.Post("/events", handleSingleEvent)
 
 	// query api
@@ -141,8 +155,8 @@ func newApp(db *pgxpool.Pool, jwtSecret []byte) *fiber.App {
 	sites.Put("/revoke-api-key", func(c *fiber.Ctx) error { return handleRevokeApiKey(c, db) })
 
 	// site management
-	sites.Post("/", func(c *fiber.Ctx) error { return handleCreateSite(c, db) })
-	sites.Get("/", func(c *fiber.Ctx) error { return handleListSites(c, db) })
+	sites.Post("/sites", func(c *fiber.Ctx) error { return handleCreateSite(c, db) })
+	sites.Get("/sites", func(c *fiber.Ctx) error { return handleListSites(c, db) })
 	sites.Delete("/:id", func(c *fiber.Ctx) error { return handleDeleteSite(c, db) })
 
 	return app
@@ -208,9 +222,9 @@ func handleRefresh(c *fiber.Ctx, db *pgxpool.Pool, jwtSecret []byte) error {
 
 	rows, err := db.Query(context.Background(), `SELECT id FROM sites WHERE user_id = $1`, userID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error" : "failed to fetch sites from the db"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch sites from the db"})
 	}
-	
+
 	defer rows.Close()
 	var siteIDs []string
 	for rows.Next() {
@@ -336,8 +350,8 @@ func handleRegister(c *fiber.Ctx, db *pgxpool.Pool) error {
 		return c.Status(fiber.StatusBadRequest).JSON(auth.ApiErr("bad_request", "invalid JSON body"))
 	}
 
-	if req.Email == "" || len(req.Password) < 8 {
-		return c.Status(fiber.StatusBadRequest).JSON(auth.ApiErr("bad_request", "invalid email or password too short"))
+	if req.Name == "" || req.Email == "" || len(req.Password) < 8 {
+		return c.Status(fiber.StatusBadRequest).JSON(auth.ApiErr("bad_request", "name, email, and password are required; password must be at least 8 characters"))
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
@@ -346,16 +360,40 @@ func handleRegister(c *fiber.Ctx, db *pgxpool.Pool) error {
 	}
 
 	_, err = db.Exec(context.Background(),
-		`INSERT INTO users (email, password_hash) VALUES ($1, $2)`,
-		req.Email, string(hashedPassword),
+		`INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3)`,
+		req.Name, req.Email, string(hashedPassword),
 	)
 	if err != nil {
-		// In production, check if the error is a unique constraint violation (duplicate email)
-		return c.Status(fiber.StatusConflict).JSON(auth.ApiErr("conflict", "email already in use"))
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return c.Status(fiber.StatusConflict).JSON(auth.ApiErr("conflict", "email already in use"))
+		}
+		log.Printf("register failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(auth.ApiErr("server_error", "failed to register user"))
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": "User registered successfully",
+	})
+}
+
+func handleAuthMe (c *fiber.Ctx, db *pgxpool.Pool) error {
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
+	if !ok || claims.UserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	var name string
+	err := db.QueryRow(context.Background(), `SELECT name FROM users WHERE id = $1`, claims.UserID).Scan(&name)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user not found"})
+	}
+
+	// profilePicUrl := "https://ui-avatars.com/api/?name=" + url.QueryEscape(name) + "&background=random"
+
+	return c.JSON(ProfileResponse{
+		UserName:      name,
+		Authenticated: true,
 	})
 }
 
@@ -560,7 +598,7 @@ func hashAPIKey(raw string) string {
 }
 
 func handleCreateApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized-invalid claims"})
@@ -624,7 +662,7 @@ func handleCreateApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
 }
 
 func handleGetAllApiKeys(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 
 	if !ok || claims.UserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
@@ -665,7 +703,7 @@ func handleGetAllApiKeys(c *fiber.Ctx, db *pgxpool.Pool) error {
 }
 
 func handleRevokeApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 	if !ok || claims.UserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
@@ -700,9 +738,9 @@ func handleRevokeApiKey(c *fiber.Ctx, db *pgxpool.Pool) error {
 }
 
 func handleCreateSite(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 	if !ok || claims.UserID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthoried"})
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 
 	var req CreateSiteRequest
@@ -710,36 +748,71 @@ func handleCreateSite(c *fiber.Ctx, db *pgxpool.Pool) error {
 		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
 	}
 
-	if req.Name == "" {
+	if req.Name == "" || req.Url == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "site name is required"})
 	}
 
+	ctx := context.Background()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+
 	var site SiteResponse
 
-	err := db.QueryRow(context.Background(),
-		`INSERT INTO sites (name, user_id, created_at) VALUES ($1, $2, NOW()) RETURNING id, name, created_at`,
-		req.Name, claims.UserID,
-	).Scan(&site.ID, &site.Name, &site.CreatedAt)
+	err = tx.QueryRow(ctx,
+		`INSERT INTO sites (name, url, user_id, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id, name, url, created_at`,
+		req.Name, req.Url, claims.UserID,
+	).Scan(&site.ID, &site.Name, &site.Url, &site.CreatedAt)
 
 	if err != nil {
+		log.Printf("ERROR handleCreateSite db query: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create site"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(site)
+	keyStr, err := generateApiKey()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to generate API key"})
+	}
+	keyHash := hashAPIKey(keyStr)
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO api_keys (site_id, user_id, key_hash, name, created_at, revoked_at) VALUES ($1, $2, $3, $4, NOW(), NULL)`,
+		site.ID, claims.UserID, keyHash, "Default Key",
+	)
+	if err != nil {
+		log.Printf("ERROR handleCreateSite api key insert: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create API key"})
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to commit transaction"})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":         site.ID,
+		"name":       site.Name,
+		"url":        site.Url,
+		"created_at": site.CreatedAt,
+		"api_key":    keyStr,
+	})
 }
 
 func handleListSites(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 	if !ok || claims.UserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 
 	rows, err := db.Query(context.Background(),
-		`SELECT id, name, created_at FROM sites WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
+		`SELECT id, name, url, created_at FROM sites WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
 		claims.UserID,
 	)
 
 	if err != nil {
+		log.Printf("ERROR handleListSites db query: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch sites"})
 	}
 
@@ -749,7 +822,7 @@ func handleListSites(c *fiber.Ctx, db *pgxpool.Pool) error {
 	for rows.Next() {
 		var s SiteResponse
 
-		if err := rows.Scan(&s.ID, &s.Name, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.Url, &s.CreatedAt); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database scan error"})
 		}
 
@@ -770,7 +843,7 @@ func handleListSites(c *fiber.Ctx, db *pgxpool.Pool) error {
 }
 
 func handleDeleteSite(c *fiber.Ctx, db *pgxpool.Pool) error {
-	claims, ok := c.Locals("jwt_claims").(auth.Claims)
+	claims, ok := c.Locals("jwt_claims").(*auth.Claims)
 	if !ok || claims.UserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}

@@ -1,7 +1,7 @@
 "use client"
 
 import { useRouter } from "next/navigation";
-import { createContext, ReactNode, useContext, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
@@ -10,11 +10,16 @@ type AuthState = {
   refreshToken: string | null;
 };
 
+type UserProfile = {
+  name: string | null;
+  // profilePic: string | null;
+}
+
 type AuthContextValue = AuthState & {
   loading: boolean;
+  user: UserProfile;
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
-  refreshAccessToken: () => Promise<string>;
   logout: () => Promise<void>;
 };
 
@@ -32,9 +37,49 @@ function getInitialAuthState(): AuthState {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children } : {children: ReactNode}) {
-  const [auth, setAuth] = useState<AuthState>(getInitialAuthState);
-  const [loading] = useState(false);
+  const [auth, setAuth] = useState<AuthState>({ accessToken: null, refreshToken: null });
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const [user, setUser] = useState<UserProfile>({ name: null});
+
+  
+  const fetchUserStatus = async (token: string): Promise<UserProfile> => {
+      try {
+        const res = await fetch(`${API}/v1/auth/me`, { 
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${token}`
+          }
+        });
+        
+        if (!res.ok) {
+          return { name: null};
+        }
+        return await res.json();
+      } catch (error) {
+        console.error("Failed to fetch user data", error);
+        return { name: null };
+      }
+    };
+  
+  useEffect(() => {
+    // setAuth(getInitialAuthState());
+    // setLoading(false);
+    
+    async function initializeAuth() {
+      const initialState = getInitialAuthState();
+      setAuth(initialState);
+      
+      if (initialState.accessToken) {
+        const userData = await fetchUserStatus(initialState.accessToken);
+        setUser(userData);
+      }
+      
+      setLoading(false);
+    }
+    
+    initializeAuth();
+  }, []);
   
   async function login(email: string, password: string) {
     const res = await fetch(`${API}/v1/auth/login`, {
@@ -51,6 +96,7 @@ export function AuthProvider({ children } : {children: ReactNode}) {
     localStorage.setItem("refresh_token", data.refresh_token);
     
     setAuth({ accessToken: data.access_token, refreshToken: data.refresh_token });
+    setLoading(false);
   }
   
   async function register(name: string, email: string, password: string) {
@@ -67,25 +113,6 @@ export function AuthProvider({ children } : {children: ReactNode}) {
     await login(email, password);
   }
   
-  
-  async function refreshAccessToken() {
-    if (!auth.refreshToken) throw new Error("No refresh Token");
-    const res = await fetch(`${API}/v1/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: auth.refreshToken }),
-    });
-    
-    if (!res.ok) {
-      throw new Error("Refresh Failed");
-    }
-    
-    const data = await res.json();
-    localStorage.setItem("access_token", data.access_token);
-    setAuth((prev) => ({ ...prev, accessToken: data.access_token }));
-    return data.access_token;
-  }
-  
   async function logout() {
     if (auth.refreshToken) {
       await fetch(`${API}/v1/auth/logout`, {
@@ -98,11 +125,13 @@ export function AuthProvider({ children } : {children: ReactNode}) {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     setAuth({ accessToken: null, refreshToken: null });
+    setUser({ name: null});
+    setLoading(false);
     router.push("/");
   }
   
   return (
-    <AuthContext.Provider value={{ ...auth, loading, login, register, logout, refreshAccessToken }}>
+    <AuthContext.Provider value={{ ...auth, loading, login, register, logout, user }}>
       {children}
     </AuthContext.Provider>
   );

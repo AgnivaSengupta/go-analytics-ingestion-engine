@@ -42,7 +42,7 @@ func GetPages(ctx context.Context, db *pgxpool.Pool, siteID string, from, to tim
 		FROM combined
 		GROUP BY 1, 2
 		ORDER BY pv DESC
-		LIMIT $4
+		LIMIT $6
 	`
 
 	rows, err := db.Query(ctx, query, siteID, from, aggregateTo, liveStart, to, limit)
